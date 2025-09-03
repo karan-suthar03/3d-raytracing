@@ -44,73 +44,52 @@ vec3 color(const ray& r, hitable *world, int depth) {
     return (1.0 - t) * vec3(1.0, 1.0, 1.0) + t * vec3(0.5, 0.7, 1.0);
 }
 
-void render_scanlines(Color* pixels, int nx, int ny, int ns, hitable* world, camera& cam, int start_y, int end_y) {
+void render_scanlines(Color* pixels, std::vector<vec3>& accum, int nx, int ny, hitable* world, camera& cam, int current_sample, int start_y, int end_y) {
     for (int j = start_y; j < end_y; j++) {
         for (int i = 0; i < nx; i++) {
-            vec3 c(0, 0, 0);
-            for (int s = 0; s < ns; s++) {
-                float u = float(i + dist(gen)) / float(nx);
-                float v = float(j + dist(gen)) / float(ny);
-                ray r = cam.get_ray(u, v);
-                c += color(r, world, 0);
-            }
-            c /= float(ns);
-            c = vec3(sqrt(c[0]), sqrt(c[1]), sqrt(c[2]));
-            c *= 255.99;
+            float u = float(i + dist(gen)) / float(nx);
+            float v = float(j + dist(gen)) / float(ny);
+            ray r = cam.get_ray(u, v);
+            vec3 c = color(r, world, 0);
 
-            {
-                std::lock_guard<std::mutex> lock(pixel_mutex);
-                pixels[(ny - 1 - j) * nx + i] = {
-                    (unsigned char)c[0],
-                    (unsigned char)c[1],
-                    (unsigned char)c[2],
-                    255
-                };
-            }
+            int idx = (ny - 1 - j) * nx + i;
+            accum[idx] += c;  // accumulate sample
+
+            vec3 avg = accum[idx] / float(current_sample);
+            avg = vec3(sqrt(avg[0]), sqrt(avg[1]), sqrt(avg[2])) * 255.99f;
+
+            pixels[idx] = {
+                (unsigned char)std::clamp(avg[0], 0.0f, 255.0f),
+                (unsigned char)std::clamp(avg[1], 0.0f, 255.0f),
+                (unsigned char)std::clamp(avg[2], 0.0f, 255.0f),
+                255
+            };
         }
-        lines_done++;
     }
 }
 
-void worker(Color* pixels, int nx, int ny, int ns, hitable* world, camera& cam) {
-    while (true) {
-        Task task;
-        {
-            std::unique_lock lock(task_mutex);
-            if (tasks.empty()) {
-                if (all_done) break;
-                task_cv.wait(lock, [] { return !tasks.empty() || all_done; });
-                if (all_done && tasks.empty()) break;
-            }
-            task = tasks.front();
-            tasks.pop_front();
-        }
+void render_pass(Color* pixels, std::vector<vec3>& accum, int nx, int ny,
+                 hitable* world, camera& cam, int current_sample) {
+    int num_threads = std::thread::hardware_concurrency();
+    if (num_threads == 0) num_threads = 4;
 
-        int count = task.end_y - task.start_y;
-        if (count > 1) {
-            // split into two smaller tasks
-            int mid = (task.start_y + task.end_y) / 2;
-            Task half1{task.start_y, mid};
-            Task half2{mid, task.end_y};
+    std::vector<std::thread> pool;
+    int rows_per_thread = ny / num_threads;
 
-            {
-                std::lock_guard lock(task_mutex);
-                tasks.push_back(half2);   // push one half back
-                tasks.push_back(half1);   // push the other half back
-            }
-            task_cv.notify_all();
-            continue;  // pick next task from queue
-        }
-        // single line -> render
-        render_scanlines(pixels, nx, ny, ns, world, cam, task.start_y, task.end_y);
-        lines_done++;
+    for (int t = 0; t < num_threads; t++) {
+        int start_y = t * rows_per_thread;
+        int end_y = (t == num_threads - 1) ? ny : start_y + rows_per_thread;
+        pool.emplace_back(render_scanlines, pixels, std::ref(accum), nx, ny,
+                          world, std::ref(cam), current_sample, start_y, end_y);
     }
+
+    for (auto& th : pool) th.join();
 }
 
 int main() {
     const int nx = 1440;
     const int ny = 720;
-    const int ns = 100;
+    // const int ns = 100;
 
     InitWindow(nx, ny, "Raytracing");
     SetTargetFPS(60);
@@ -128,42 +107,24 @@ int main() {
 
     Texture2D texture = LoadTextureFromImage(img);
 
-    {
-        std::lock_guard<std::mutex> lock(task_mutex);
-        tasks.push_back({0, ny});
-    }
-
-    // spawn worker pool
-    int num_threads = std::thread::hardware_concurrency();
-    if (num_threads == 0) num_threads = 4;
-    std::vector<std::thread> pool;
-    for (int i = 0; i < num_threads; i++) {
-        pool.emplace_back(worker, pixels, nx, ny, ns, world, std::ref(cam));
-    }
-    // std::cout<< "perlin::" << ValueNoise_2D(20,20);
+    std::vector<vec3> accum(nx * ny, vec3(0,0,0)); // buffer
+    int sample_count = 0;
 
     while (!WindowShouldClose()) {
-        {
-            std::lock_guard<std::mutex> lock(pixel_mutex);
-            UpdateTexture(texture, pixels);
-        }
+        sample_count++;
+
+        // render one frame per frame
+        render_pass(pixels, accum, nx, ny, world, cam, sample_count);
+
+        UpdateTexture(texture, pixels);
 
         BeginDrawing();
         ClearBackground(BLACK);
         DrawTexture(texture, 0, 0, WHITE);
-        DrawText(TextFormat("Lines done: %d/%d", lines_done.load(), ny), 10, 10, 20, RAYWHITE);
+        DrawText(TextFormat("samples done: %d", sample_count), 10, 10, 20, Color(0,0,0,255));
         EndDrawing();
-
-        if (rendering_done) {
-            // keep showing final result until window closed
-        }
     }
-
-    {
-        std::lock_guard<std::mutex> lock(task_mutex);
-        all_done = true;
-    }
-    task_cv.notify_all();
+    // task_cv.notify_all();
 
     // render_thread.join();
     UnloadTexture(texture);
