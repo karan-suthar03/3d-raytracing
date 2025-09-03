@@ -94,16 +94,24 @@ int main() {
     InitWindow(nx, ny, "Raytracing");
     SetTargetFPS(60);
 
-    hitable* list[4];
-    list[0] = new sphere(vec3(0, 0, -1), 0.25, new lambertian(vec3(0.8, 0.3, 0.3)));
+    hitable* list[5];
+    list[0] = new sphere(vec3(0, 0, -1), 0.2, new lambertian(vec3(0.8, 0.3, 0.3)));
     list[1] = new sphere(vec3(0, -100.5, -1), 100, new lambertian(vec3(0.8, 0.8, 0.0)));
-    list[2] = new cube(vec3(-0.7,0,-1),0.5,new metal(vec3(0.8,0.6,0.2),0.01));
-    list[3] = new cube(vec3(0.7,0,-1),0.5,new dielectric(1.5));
-    hitable* world = new hitable_list(list, 4);
+    list[2] = new cube(vec3(-0.7,0,-1),0.5,new lambertian(vec3(0.2,0.1,0.9)));
+    list[3] = new cube(vec3(0.0,0,-1),0.5,new dielectric(1.5));
+    list[4] = new sphere(vec3(0.5,0,-1.2),0.2,new metal(vec3(0.0,1,0.7),0.1));
+    hitable* world = new hitable_list(list, 5);
 
     Image img = GenImageColor(nx, ny, BLACK);
     Color* pixels = (Color*)img.data;
-    camera cam;
+    float aspect = float(nx) / float(ny);
+    vec3 lookfrom(1,0.5,-0.5);
+    vec3 lookat(0,0,-1);
+    vec3 vup(0,1,0);
+    float fov = 45;
+
+    camera cam(lookfrom, lookat, vup, fov, aspect);
+
 
     Texture2D texture = LoadTextureFromImage(img);
 
